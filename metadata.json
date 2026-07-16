@@ -1,0 +1,6 @@
+{
+  "name": "Bad Friday",
+  "description": "ระบบจัดการคอร์ทแบดมินตัน จัดคู่ และสรุปค่าใช้จ่ายประจำก๊วน Bad Friday (เสือ 037)",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
