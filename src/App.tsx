@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Player, Court, Match, MatchWinner, MatchType, MatchStatus, Booking } from './types';
+import { isFirebaseConfigured, db, handleFirestoreError, OperationType } from './utils/firebase';
+import { collection, onSnapshot, doc, writeBatch } from 'firebase/firestore';
 import {
   INITIAL_PLAYERS,
   INITIAL_COURTS,
@@ -132,7 +134,67 @@ export default function App() {
     serverVersionRef.current = serverVersion;
   }, [serverVersion]);
 
-  // Synchronize state with server on user actions
+  // Firebase Real-time Synchronization Listeners
+  useEffect(() => {
+    if (!isFirebaseConfigured()) return;
+
+    let active = true;
+    console.log('[Firebase] Active - setting up real-time snapshot listeners');
+
+    const unsubscribePlayers = onSnapshot(collection(db, 'players'), (snapshot) => {
+      if (!active) return;
+      const list: Player[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(docSnap.data() as Player);
+      });
+      setPlayers(list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'players');
+    });
+
+    const unsubscribeCourts = onSnapshot(collection(db, 'courts'), (snapshot) => {
+      if (!active) return;
+      const list: Court[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(docSnap.data() as Court);
+      });
+      setCourts(list.sort((a, b) => a.id.localeCompare(b.id)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'courts');
+    });
+
+    const unsubscribeMatches = onSnapshot(collection(db, 'matches'), (snapshot) => {
+      if (!active) return;
+      const list: Match[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(docSnap.data() as Match);
+      });
+      setMatches(list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'matches');
+    });
+
+    const unsubscribeBookings = onSnapshot(collection(db, 'bookings'), (snapshot) => {
+      if (!active) return;
+      const list: Booking[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(docSnap.data() as Booking);
+      });
+      setBookings(list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'bookings');
+    });
+
+    return () => {
+      active = false;
+      unsubscribePlayers();
+      unsubscribeCourts();
+      unsubscribeMatches();
+      unsubscribeBookings();
+    };
+  }, []);
+
+  // Synchronize state with server or Firestore on user actions
   const syncStateWithServer = async (
     newPlayers: Player[],
     newCourts: Court[],
@@ -140,6 +202,67 @@ export default function App() {
     newBookings: Booking[]
   ) => {
     isSyncingRef.current = true;
+
+    // A. Sync with Firestore if configured
+    if (isFirebaseConfigured()) {
+      try {
+        const batch = writeBatch(db);
+
+        // 1. Players Diff
+        const newPlayerIds = new Set(newPlayers.map(p => p.id));
+        players.forEach(p => {
+          if (!newPlayerIds.has(p.id)) {
+            batch.delete(doc(db, 'players', p.id));
+          }
+        });
+        newPlayers.forEach(p => {
+          batch.set(doc(db, 'players', p.id), p);
+        });
+
+        // 2. Courts Diff
+        const newCourtIds = new Set(newCourts.map(c => c.id));
+        courts.forEach(c => {
+          if (!newCourtIds.has(c.id)) {
+            batch.delete(doc(db, 'courts', c.id));
+          }
+        });
+        newCourts.forEach(c => {
+          batch.set(doc(db, 'courts', c.id), c);
+        });
+
+        // 3. Matches Diff
+        const newMatchIds = new Set(newMatches.map(m => m.id));
+        matches.forEach(m => {
+          if (!newMatchIds.has(m.id)) {
+            batch.delete(doc(db, 'matches', m.id));
+          }
+        });
+        newMatches.forEach(m => {
+          batch.set(doc(db, 'matches', m.id), m);
+        });
+
+        // 4. Bookings Diff
+        const newBookingIds = new Set(newBookings.map(b => b.id));
+        bookings.forEach(b => {
+          if (!newBookingIds.has(b.id)) {
+            batch.delete(doc(db, 'bookings', b.id));
+          }
+        });
+        newBookings.forEach(b => {
+          batch.set(doc(db, 'bookings', b.id), b);
+        });
+
+        await batch.commit();
+        console.log('[Firebase] Successfully committed batch update to Firestore');
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, 'batch_update');
+      } finally {
+        isSyncingRef.current = false;
+      }
+      return;
+    }
+
+    // B. Fallback to Express + WebSocket Server
     try {
       const res = await fetch('/api/state', {
         method: 'POST',
@@ -166,6 +289,8 @@ export default function App() {
 
   // WebSocket for instantaneous updates
   useEffect(() => {
+    if (isFirebaseConfigured()) return; // Bypass WebSocket when Firebase is active
+
     let socket: WebSocket | null = null;
     let reconnectTimeout: any = null;
     let active = true;
@@ -236,6 +361,8 @@ export default function App() {
 
   // Poll server state for real-time updates as a robust fallback
   useEffect(() => {
+    if (isFirebaseConfigured()) return; // Bypass polling when Firebase is active
+
     let active = true;
 
     const fetchState = async () => {
@@ -640,19 +767,29 @@ export default function App() {
                   Design by Badminton care
                 </p>
                 <span className="text-slate-300 hidden sm:inline text-xs">|</span>
-                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1.5 transition-all ${
-                  isWsConnected 
-                    ? 'text-emerald-700 bg-emerald-50 border border-emerald-200' 
-                    : 'text-amber-700 bg-amber-50 border border-amber-200 animate-pulse'
-                }`}>
-                  <span className={`relative flex h-1.5 w-1.5`}>
-                    {isWsConnected && (
+                {isFirebaseConfigured() ? (
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1.5 transition-all text-emerald-700 bg-emerald-50 border border-emerald-200">
+                    <span className="relative flex h-1.5 w-1.5">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    )}
-                    <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isWsConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`}></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                    </span>
+                    <span>เรียลไทม์ (Firebase)</span>
                   </span>
-                  <span>{isWsConnected ? 'เรียลไทม์ (Connected)' : 'กำลังเชื่อมต่อใหม่...'}</span>
-                </span>
+                ) : (
+                  <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1.5 transition-all ${
+                    isWsConnected 
+                      ? 'text-emerald-700 bg-emerald-50 border border-emerald-200' 
+                      : 'text-amber-700 bg-amber-50 border border-amber-200 animate-pulse'
+                  }`}>
+                    <span className={`relative flex h-1.5 w-1.5`}>
+                      {isWsConnected && (
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      )}
+                      <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isWsConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`}></span>
+                    </span>
+                    <span>{isWsConnected ? 'เรียลไทม์ (Connected)' : 'กำลังเชื่อมต่อใหม่...'}</span>
+                  </span>
+                )}
               </div>
             </div>
           </div>
