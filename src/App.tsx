@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Player, Court, Match, MatchWinner, MatchType, MatchStatus, Booking } from './types';
 import {
   INITIAL_PLAYERS,
@@ -123,6 +123,157 @@ export default function App() {
     localStorage.setItem('badminton_admin_email', adminEmail);
   }, [adminEmail]);
 
+  const [serverVersion, setServerVersion] = useState<number>(0);
+  const isSyncingRef = useRef(false);
+  const [isWsConnected, setIsWsConnected] = useState(false);
+  const serverVersionRef = useRef<number>(0);
+
+  useEffect(() => {
+    serverVersionRef.current = serverVersion;
+  }, [serverVersion]);
+
+  // Synchronize state with server on user actions
+  const syncStateWithServer = async (
+    newPlayers: Player[],
+    newCourts: Court[],
+    newMatches: Match[],
+    newBookings: Booking[]
+  ) => {
+    isSyncingRef.current = true;
+    try {
+      const res = await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          players: newPlayers,
+          courts: newCourts,
+          matches: newMatches,
+          bookings: newBookings,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.version) {
+          setServerVersion(data.version);
+        }
+      }
+    } catch (e) {
+      console.error('Error syncing state with server:', e);
+    } finally {
+      isSyncingRef.current = false;
+    }
+  };
+
+  // WebSocket for instantaneous updates
+  useEffect(() => {
+    let socket: WebSocket | null = null;
+    let reconnectTimeout: any = null;
+    let active = true;
+
+    const connect = () => {
+      if (!active) return;
+      try {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws-sync`;
+        socket = new WebSocket(wsUrl);
+
+        socket.onopen = () => {
+          if (active) {
+            console.log('WebSocket connected successfully for real-time sync.');
+            setIsWsConnected(true);
+          }
+        };
+
+        socket.onmessage = (event) => {
+          if (!active) return;
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'state_update' && data.state) {
+              const state = data.state;
+              if (state.version && state.version !== serverVersionRef.current) {
+                setPlayers(state.players || []);
+                setCourts(state.courts || []);
+                setMatches(state.matches || []);
+                setBookings(state.bookings || []);
+                setServerVersion(state.version);
+              }
+            }
+          } catch (e) {
+            console.error('Error parsing WebSocket message:', e);
+          }
+        };
+
+        socket.onclose = () => {
+          if (active) {
+            console.log('WebSocket connection closed. Reconnecting in 3s...');
+            setIsWsConnected(false);
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
+
+        socket.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          if (socket) socket.close();
+        };
+      } catch (e) {
+        console.error('WebSocket connection setup failed:', e);
+        if (active) {
+          reconnectTimeout = setTimeout(connect, 5000);
+        }
+      }
+    };
+
+    connect();
+
+    return () => {
+      active = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, []);
+
+  // Poll server state for real-time updates as a robust fallback
+  useEffect(() => {
+    let active = true;
+
+    const fetchState = async () => {
+      if (isSyncingRef.current) return;
+      if (isWsConnected) return; // Skip frequent polling if WS is healthy
+
+      try {
+        const res = await fetch('/api/state');
+        if (!res.ok) throw new Error('Failed to fetch state');
+        const data = await res.json();
+        
+        if (!active) return;
+        if (isSyncingRef.current) return;
+
+        if (data.version && data.version !== serverVersion) {
+          setPlayers(data.players || []);
+          setCourts(data.courts || []);
+          setMatches(data.matches || []);
+          setBookings(data.bookings || []);
+          setServerVersion(data.version);
+        }
+      } catch (error) {
+        console.error('Error fetching state from server:', error);
+      }
+    };
+
+    if (!isWsConnected) {
+      fetchState();
+    }
+
+    const interval = setInterval(fetchState, isWsConnected ? 15000 : 3000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [serverVersion, isWsConnected]);
+
   // Booking Handlers
   const handleAddBooking = (bookingData: Omit<Booking, 'id' | 'createdAt'>) => {
     const newBooking: Booking = {
@@ -130,17 +281,27 @@ export default function App() {
       id: 'booking_' + Date.now(),
       createdAt: new Date().toISOString(),
     };
-    setBookings((prev) => [newBooking, ...prev]);
+    setBookings((prev) => {
+      const next = [newBooking, ...prev];
+      syncStateWithServer(players, courts, matches, next);
+      return next;
+    });
   };
 
   const handleConfirmBooking = (id: string) => {
-    setBookings((prev) =>
-      prev.map((b) => (b.id === id ? { ...b, status: 'confirmed' } : b))
-    );
+    setBookings((prev) => {
+      const next = prev.map((b) => (b.id === id ? { ...b, status: 'confirmed' } : b));
+      syncStateWithServer(players, courts, matches, next);
+      return next;
+    });
   };
 
   const handleDeleteBooking = (id: string) => {
-    setBookings((prev) => prev.filter((b) => b.id !== id));
+    setBookings((prev) => {
+      const next = prev.filter((b) => b.id !== id);
+      syncStateWithServer(players, courts, matches, next);
+      return next;
+    });
   };
 
   // Clean up any stale player statuses on boot to prevent locked states
@@ -176,17 +337,27 @@ export default function App() {
       status: 'available',
       createdAt: new Date().toISOString(),
     };
-    setPlayers((prev) => [player, ...prev]);
+    setPlayers((prev) => {
+      const next = [player, ...prev];
+      syncStateWithServer(next, courts, matches, bookings);
+      return next;
+    });
   };
 
   const handleUpdatePlayer = (id: string, updates: Partial<Player>) => {
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
-    );
+    setPlayers((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, ...updates } : p));
+      syncStateWithServer(next, courts, matches, bookings);
+      return next;
+    });
   };
 
   const handleDeletePlayer = (id: string) => {
-    setPlayers((prev) => prev.filter((p) => p.id !== id));
+    setPlayers((prev) => {
+      const next = prev.filter((p) => p.id !== id);
+      syncStateWithServer(next, courts, matches, bookings);
+      return next;
+    });
   };
 
   // Matchmaker Open Trigger
@@ -208,41 +379,39 @@ export default function App() {
       completedAt: null,
     };
 
-    setMatches((prev) => [...prev, newMatch]);
+    const nextMatches = [...matches, newMatch];
+    let nextCourts = courts;
+    let nextPlayers = players;
 
-    // Update Court status if starting playing immediately
+    const playerIds = [...matchData.teamA, ...matchData.teamB];
     if (matchData.status === 'playing') {
-      setCourts((prev) =>
-        prev.map((c) =>
-          c.id === matchData.courtId
-            ? { ...c, status: 'playing', currentMatchId: matchId }
-            : c
-        )
+      nextCourts = courts.map((c) =>
+        c.id === matchData.courtId
+          ? { ...c, status: 'playing', currentMatchId: matchId }
+          : c
       );
-
-      // Set participating players' status to 'playing'
-      const playerIds = [...matchData.teamA, ...matchData.teamB];
-      setPlayers((prev) =>
-        prev.map((p) =>
-          playerIds.includes(p.id) ? { ...p, status: 'playing' } : p
-        )
+      nextPlayers = players.map((p) =>
+        playerIds.includes(p.id) ? { ...p, status: 'playing' } : p
       );
     } else {
-      // If waiting in queue, set participating players' status to 'waiting'
-      const playerIds = [...matchData.teamA, ...matchData.teamB];
-      setPlayers((prev) =>
-        prev.map((p) =>
-          playerIds.includes(p.id) ? { ...p, status: 'waiting' } : p
-        )
+      nextPlayers = players.map((p) =>
+        playerIds.includes(p.id) ? { ...p, status: 'waiting' } : p
       );
     }
+
+    setMatches(nextMatches);
+    setCourts(nextCourts);
+    setPlayers(nextPlayers);
+    syncStateWithServer(nextPlayers, nextCourts, nextMatches, bookings);
   };
 
   // Live Shuttlecock Counters
   const handleUpdateMatchShuttlecocks = (matchId: string, count: number) => {
-    setMatches((prev) =>
-      prev.map((m) => (m.id === matchId ? { ...m, shuttlecocks: count } : m))
-    );
+    setMatches((prev) => {
+      const next = prev.map((m) => (m.id === matchId ? { ...m, shuttlecocks: count } : m));
+      syncStateWithServer(players, courts, next, bookings);
+      return next;
+    });
   };
 
   // Match Completion Handler
@@ -250,48 +419,44 @@ export default function App() {
     const match = matches.find((m) => m.id === matchId);
     if (!match) return;
 
-    setMatches((prev) =>
-      prev.map((m) =>
-        m.id === matchId
-          ? {
-              ...m,
-              status: 'completed',
-              winner,
-              shuttlecocks: finalShuttlecocks,
-              duration: finalDuration,
-              completedAt: new Date().toISOString(),
-            }
-          : m
-      )
+    const nextMatches = matches.map((m) =>
+      m.id === matchId
+        ? {
+            ...m,
+            status: 'completed',
+            winner,
+            shuttlecocks: finalShuttlecocks,
+            duration: finalDuration,
+            completedAt: new Date().toISOString(),
+          }
+        : m
     );
 
-    // Release players
     const matchPlayers = [...match.teamA, ...match.teamB];
-    setPlayers((prev) =>
-      prev.map((p) =>
-        matchPlayers.includes(p.id) ? { ...p, status: 'available' } : p
-      )
+    const nextPlayers = players.map((p) =>
+      matchPlayers.includes(p.id) ? { ...p, status: 'available' } : p
     );
 
-    // Free up court
-    setCourts((prev) =>
-      prev.map((c) =>
-        c.id === match.courtId
-          ? { ...c, status: 'empty', currentMatchId: null }
-          : c
-      )
+    const nextCourts = courts.map((c) =>
+      c.id === match.courtId
+        ? { ...c, status: 'empty', currentMatchId: null }
+        : c
     );
+
+    setMatches(nextMatches);
+    setPlayers(nextPlayers);
+    setCourts(nextCourts);
+    syncStateWithServer(nextPlayers, nextCourts, nextMatches, bookings);
 
     // Smart Auto-Promote next queued match if exists
     setTimeout(() => {
-      const remainingQueued = matches.filter(
+      const remainingQueued = nextMatches.filter(
         (m) => m.status === 'waiting' && m.courtId === match.courtId && m.id !== matchId
       );
       if (remainingQueued.length > 0) {
-        // Auto alert or offer promotion
         const nextMatch = remainingQueued[0];
         if (confirm(`สนามว่างแล้ว! เริ่มแข่งคิวถัดไปเลยหรือไม่?`)) {
-          handlePromoteMatch(nextMatch.id);
+          handlePromoteMatch(nextMatch.id, nextPlayers, nextCourts, nextMatches);
         }
       }
     }, 100);
@@ -302,44 +467,49 @@ export default function App() {
     const match = matches.find((m) => m.id === matchId);
     if (!match) return;
 
-    setMatches((prev) => prev.filter((m) => m.id !== matchId));
+    const nextMatches = matches.filter((m) => m.id !== matchId);
 
-    // Release players back to available
     const matchPlayers = [...match.teamA, ...match.teamB];
-    setPlayers((prev) =>
-      prev.map((p) =>
-        matchPlayers.includes(p.id) ? { ...p, status: 'available' } : p
-      )
+    const nextPlayers = players.map((p) =>
+      matchPlayers.includes(p.id) ? { ...p, status: 'available' } : p
     );
+
+    setMatches(nextMatches);
+    setPlayers(nextPlayers);
+    syncStateWithServer(nextPlayers, courts, nextMatches, bookings);
   };
 
   // Promote waiting match to active play
-  const handlePromoteMatch = (matchId: string) => {
-    const match = matches.find((m) => m.id === matchId);
+  const handlePromoteMatch = (
+    matchId: string,
+    currentPlayers = players,
+    currentCourts = courts,
+    currentMatches = matches
+  ) => {
+    const match = currentMatches.find((m) => m.id === matchId);
     if (!match) return;
 
-    setMatches((prev) =>
-      prev.map((m) =>
-        m.id === matchId
-          ? { ...m, status: 'playing', createdAt: new Date().toISOString() }
-          : m
-      )
+    const nextMatches = currentMatches.map((m) =>
+      m.id === matchId
+        ? { ...m, status: 'playing', createdAt: new Date().toISOString() }
+        : m
     );
 
-    setCourts((prev) =>
-      prev.map((c) =>
-        c.id === match.courtId
-          ? { ...c, status: 'playing', currentMatchId: matchId }
-          : c
-      )
+    const nextCourts = currentCourts.map((c) =>
+      c.id === match.courtId
+        ? { ...c, status: 'playing', currentMatchId: matchId }
+        : c
     );
 
     const matchPlayers = [...match.teamA, ...match.teamB];
-    setPlayers((prev) =>
-      prev.map((p) =>
-        matchPlayers.includes(p.id) ? { ...p, status: 'playing' } : p
-      )
+    const nextPlayers = currentPlayers.map((p) =>
+      matchPlayers.includes(p.id) ? { ...p, status: 'playing' } : p
     );
+
+    setMatches(nextMatches);
+    setCourts(nextCourts);
+    setPlayers(nextPlayers);
+    syncStateWithServer(nextPlayers, nextCourts, nextMatches, bookings);
   };
 
   // Reset entire session (Clear stats, but preserve player database)
@@ -349,21 +519,94 @@ export default function App() {
         'คุณแน่ใจหรือไม่ที่จะรีเซ็ตข้อมูลการแข่งขันและค่าใช้จ่ายของวันนี้ทั้งหมด? (รายชื่อผู้เล่นหลักจะไม่ถูกลบ)'
       )
     ) {
-      // Delete finished/active matches of today
-      setMatches((prev) => prev.filter((m) => m.status === 'completed' && new Date(m.createdAt).toDateString() !== new Date().toDateString()));
+      const nextMatches = matches.filter((m) => m.status === 'completed' && new Date(m.createdAt).toDateString() !== new Date().toDateString());
+      const nextCourts = INITIAL_COURTS;
+      const nextPlayers = players.map((p) => ({
+        ...p,
+        status: 'available',
+      }));
 
-      // Reset court status
-      setCourts(INITIAL_COURTS);
-
-      // Reset player availability to available and checkout some
-      setPlayers((prev) =>
-        prev.map((p) => ({
-          ...p,
-          status: 'available',
-        }))
-      );
+      setMatches(nextMatches);
+      setCourts(nextCourts);
+      setPlayers(nextPlayers);
+      syncStateWithServer(nextPlayers, nextCourts, nextMatches, bookings);
     }
   };
+
+  // Get color of the day for the logo background
+  const dayColor = useMemo(() => {
+    const day = new Date().getDay(); // 0: Sunday, 1: Monday, ... 6: Saturday
+    switch (day) {
+      case 0: // Sunday: Red
+        return {
+          bg: 'from-red-500 via-rose-600 to-red-700',
+          shadow: 'shadow-red-600/20',
+          text: 'text-red-200',
+          border: 'border-red-400/20',
+          blur: 'from-red-500 to-rose-600',
+        };
+      case 1: // Monday: Yellow
+        return {
+          bg: 'from-yellow-400 via-amber-400 to-yellow-500',
+          shadow: 'shadow-amber-500/20',
+          text: 'text-amber-950',
+          border: 'border-yellow-300/20',
+          blur: 'from-yellow-400 to-amber-500',
+        };
+      case 2: // Tuesday: Pink
+        return {
+          bg: 'from-pink-400 via-rose-400 to-fuchsia-500',
+          shadow: 'shadow-pink-500/20',
+          text: 'text-pink-100',
+          border: 'border-pink-300/20',
+          blur: 'from-pink-400 to-rose-400',
+        };
+      case 3: // Wednesday: Green
+        return {
+          bg: 'from-emerald-400 via-green-500 to-teal-600',
+          shadow: 'shadow-emerald-500/20',
+          text: 'text-emerald-100',
+          border: 'border-emerald-300/20',
+          blur: 'from-emerald-400 to-green-500',
+        };
+      case 4: // Thursday: Orange
+        return {
+          bg: 'from-orange-400 via-amber-500 to-red-600',
+          shadow: 'shadow-orange-500/20',
+          text: 'text-orange-100',
+          border: 'border-orange-300/20',
+          blur: 'from-orange-400 to-amber-500',
+        };
+      case 5: // Friday: Blue
+        return {
+          bg: 'from-sky-400 via-blue-500 to-indigo-600',
+          shadow: 'shadow-blue-500/20',
+          text: 'text-sky-100',
+          border: 'border-sky-300/20',
+          blur: 'from-sky-400 to-blue-500',
+        };
+      case 6: // Saturday: Purple
+        return {
+          bg: 'from-purple-500 via-violet-600 to-fuchsia-700',
+          shadow: 'shadow-purple-600/20',
+          text: 'text-purple-100',
+          border: 'border-purple-400/20',
+          blur: 'from-purple-500 to-violet-600',
+        };
+      default:
+        return {
+          bg: 'from-amber-500 via-orange-600 to-red-700',
+          shadow: 'shadow-orange-600/20',
+          text: 'text-amber-200',
+          border: 'border-amber-400/20',
+          blur: 'from-amber-500 to-red-600',
+        };
+    }
+  }, []);
+
+  const pendingBookingsCount = useMemo(() => {
+    return bookings.filter((b) => b.status === 'pending').length;
+  }, [bookings]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 pb-12 font-sans selection:bg-emerald-500 selection:text-white">
@@ -373,11 +616,11 @@ export default function App() {
           {/* Logo Brand */}
           <div className="flex items-center gap-3">
             <div className="relative flex items-center justify-center">
-              <div className="absolute -inset-1 bg-gradient-to-r from-amber-500 to-red-600 rounded-2xl blur opacity-25 animate-pulse"></div>
-              <div className="relative p-2.5 bg-gradient-to-br from-amber-500 via-orange-600 to-red-700 rounded-2xl text-white shadow-lg shadow-orange-600/20 flex items-center gap-1.5 px-3.5 py-2 border border-amber-400/20">
+              <div className={`absolute -inset-1 bg-gradient-to-r ${dayColor.blur} rounded-2xl blur opacity-25 animate-pulse`}></div>
+              <div className={`relative p-2.5 bg-gradient-to-br ${dayColor.bg} rounded-2xl text-white shadow-lg ${dayColor.shadow} flex items-center gap-1.5 px-3.5 py-2 border ${dayColor.border}`}>
                 <span className="text-2xl animate-bounce" style={{ animationDuration: '3s' }}>🐯</span>
                 <div className="flex flex-col leading-none">
-                  <span className="text-[10px] font-black tracking-widest text-amber-200">เสือ</span>
+                  <span className={`text-[10px] font-black tracking-widest ${dayColor.text}`}>เสือ</span>
                   <span className="text-base font-black tracking-tighter text-white">037</span>
                 </div>
               </div>
@@ -396,6 +639,20 @@ export default function App() {
                 <p className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
                   Design by Badminton care
                 </p>
+                <span className="text-slate-300 hidden sm:inline text-xs">|</span>
+                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1.5 transition-all ${
+                  isWsConnected 
+                    ? 'text-emerald-700 bg-emerald-50 border border-emerald-200' 
+                    : 'text-amber-700 bg-amber-50 border border-amber-200 animate-pulse'
+                }`}>
+                  <span className={`relative flex h-1.5 w-1.5`}>
+                    {isWsConnected && (
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    )}
+                    <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isWsConnected ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`}></span>
+                  </span>
+                  <span>{isWsConnected ? 'เรียลไทม์ (Connected)' : 'กำลังเชื่อมต่อใหม่...'}</span>
+                </span>
               </div>
             </div>
           </div>
@@ -506,14 +763,27 @@ export default function App() {
           <button
             id="tab-bookings"
             onClick={() => setActiveTab('bookings')}
-            className={`pb-3 px-4 text-sm font-extrabold transition-all duration-200 flex items-center gap-2 border-b-2 shrink-0 ${
+            className={`pb-3 px-4 text-sm font-extrabold transition-all duration-200 flex items-center gap-2 border-b-2 shrink-0 relative ${
               activeTab === 'bookings'
                 ? 'border-emerald-600 text-emerald-700'
                 : 'border-transparent text-slate-400 hover:text-slate-600'
             }`}
           >
-            <CalendarDays className="w-4 h-4" />
-            จองสนามล่วงหน้า ({bookings.length})
+            <div className="relative">
+              <CalendarDays className="w-4 h-4" />
+              {pendingBookingsCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                </span>
+              )}
+            </div>
+            <span>จองสนามล่วงหน้า ({bookings.length})</span>
+            {pendingBookingsCount > 0 && (
+              <span className="ml-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full h-5 min-w-[20px] flex items-center justify-center border border-white shadow-sm animate-pulse">
+                {pendingBookingsCount}
+              </span>
+            )}
           </button>
         </div>
 

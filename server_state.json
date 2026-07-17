@@ -1,0 +1,14 @@
+{
+  "players": [],
+  "courts": [
+    { "id": "c1", "name": "สนาม 1", "status": "empty", "currentMatchId": null },
+    { "id": "c2", "name": "สนาม 2", "status": "empty", "currentMatchId": null },
+    { "id": "c3", "name": "สนาม 3", "status": "empty", "currentMatchId": null },
+    { "id": "c4", "name": "สนาม 4", "status": "empty", "currentMatchId": null },
+    { "id": "c5", "name": "สนาม 5", "status": "empty", "currentMatchId": null },
+    { "id": "c6", "name": "สนาม 6", "status": "empty", "currentMatchId": null }
+  ],
+  "matches": [],
+  "bookings": [],
+  "version": 1
+}
