@@ -137,11 +137,15 @@ setupVite().then(() => {
 
   // Handle upgrade to WebSockets manually
   server.on("upgrade", (request, socket, head) => {
-    const pathname = new URL(request.url || "", `http://${request.headers.host}`).pathname;
-    if (pathname === "/ws-sync") {
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request);
-      });
+    try {
+      const pathname = request.url ? request.url.split("?")[0] : "";
+      if (pathname === "/ws-sync") {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit("connection", ws, request);
+        });
+      }
+    } catch (err) {
+      console.error("[WS] Upgrade handling error:", err);
     }
   });
 });

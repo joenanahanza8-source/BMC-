@@ -212,11 +212,11 @@ export default function App() {
         };
 
         socket.onerror = (error) => {
-          console.error('WebSocket error:', error);
+          console.warn('WebSocket connection status: inactive/not available. Falling back to HTTP polling.');
           if (socket) socket.close();
         };
       } catch (e) {
-        console.error('WebSocket connection setup failed:', e);
+        console.warn('WebSocket connection setup failed:', e);
         if (active) {
           reconnectTimeout = setTimeout(connect, 5000);
         }
