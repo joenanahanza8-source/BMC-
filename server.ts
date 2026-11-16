@@ -77,6 +77,7 @@ function loadState() {
     courts: INITIAL_COURTS,
     matches: INITIAL_MATCHES,
     bookings: INITIAL_BOOKINGS,
+    vehicleBorrowings: [],
     version: Date.now(),
   };
 }
@@ -97,12 +98,13 @@ app.get("/api/state", (req, res) => {
 });
 
 app.post("/api/state", (req, res) => {
-  const { players, courts, matches, bookings } = req.body;
+  const { players, courts, matches, bookings, vehicleBorrowings } = req.body;
   const newState = {
     players: players || [],
     courts: courts || [],
     matches: matches || [],
     bookings: bookings || [],
+    vehicleBorrowings: vehicleBorrowings || [],
     version: Date.now(),
   };
   saveState(newState);

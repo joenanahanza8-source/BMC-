@@ -46,6 +46,20 @@ export interface Booking {
   createdAt: string;
 }
 
+export type VehicleBorrowingStatus = 'borrowed' | 'returned' | 'cancelled';
+
+export interface VehicleBorrowing {
+  id: string;
+  department: string; // แผนก
+  vehicleName: string; // รถยนต์ / ทะเบียนรถ / รุ่น
+  borrowDateTime: string; // วันเวลาที่ยืม
+  borrowerName: string; // ผู้ยืม
+  returnDateTime?: string; // วันเวลาที่คืน
+  purpose?: string; // วัตถุประสงค์
+  status: VehicleBorrowingStatus; // สถานะ
+  createdAt: string;
+}
+
 export interface DailySummary {
   date: string;
   totalPlayers: number;

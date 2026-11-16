@@ -72,6 +72,18 @@ service cloud.firestore {
         && data.createdAt is string;
     }
 
+    // Validation helper for VehicleBorrowing
+    function isValidVehicleBorrowing(data) {
+      return data.keys().hasAll(['id', 'department', 'vehicleName', 'borrowDateTime', 'borrowerName', 'status', 'createdAt'])
+        && data.id is string && data.id.size() <= 128
+        && data.department is string && data.department.size() > 0 && data.department.size() <= 100
+        && data.vehicleName is string && data.vehicleName.size() > 0 && data.vehicleName.size() <= 100
+        && data.borrowDateTime is string && data.borrowDateTime.size() > 0 && data.borrowDateTime.size() <= 100
+        && data.borrowerName is string && data.borrowerName.size() > 0 && data.borrowerName.size() <= 100
+        && data.status is string && (data.status == 'borrowed' || data.status == 'returned' || data.status == 'cancelled')
+        && data.createdAt is string;
+    }
+
     // Rule blocks
     match /players/{playerId} {
       allow read: if true;
@@ -99,6 +111,13 @@ service cloud.firestore {
       allow create: if isValidId(bookingId) && isValidBooking(incoming());
       allow update: if isValidId(bookingId) && isValidBooking(incoming());
       allow delete: if isValidId(bookingId);
+    }
+
+    match /vehicle_borrowings/{borrowingId} {
+      allow read: if true;
+      allow create: if isValidId(borrowingId) && isValidVehicleBorrowing(incoming());
+      allow update: if isValidId(borrowingId) && isValidVehicleBorrowing(incoming());
+      allow delete: if isValidId(borrowingId);
     }
   }
 }

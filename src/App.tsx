@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Player, Court, Match, MatchWinner, MatchType, MatchStatus, Booking } from './types';
+import { Player, Court, Match, MatchWinner, MatchType, MatchStatus, Booking, VehicleBorrowing, VehicleBorrowingStatus } from './types';
 import { isFirebaseConfigured, db, handleFirestoreError, OperationType } from './utils/firebase';
 import { collection, onSnapshot, doc, writeBatch } from 'firebase/firestore';
 import {
@@ -13,6 +13,7 @@ import CourtList from './components/CourtList';
 import ExpenseSummary from './components/ExpenseSummary';
 import WeeklyStats from './components/WeeklyStats';
 import BookingManager from './components/BookingManager';
+import VehicleBorrowingManager from './components/VehicleBorrowingManager';
 import {
   Activity,
   Users,
@@ -26,7 +27,8 @@ import {
   Trash2,
   Calendar,
   AlertCircle,
-  CalendarDays
+  CalendarDays,
+  Car
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -50,6 +52,31 @@ const INITIAL_BOOKINGS: Booking[] = [
     bookerName: 'คุณอรอุมา เลิฟแบด',
     phoneNumber: '098-765-4321',
     status: 'pending',
+    createdAt: new Date().toISOString(),
+  }
+];
+
+// Seed initial vehicle borrowings with realistic sample values
+const INITIAL_VEHICLE_BORROWINGS: VehicleBorrowing[] = [
+  {
+    id: 'vb1',
+    department: 'แผนกสวัสดิการ',
+    vehicleName: 'รถตู้ก๊วนแบด (กข-1234 กทม)',
+    borrowDateTime: new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 16),
+    borrowerName: 'สมศักดิ์ แขนเหล็ก',
+    purpose: 'ขนส่งอุปกรณ์และผู้เล่นประจำวันศุกร์',
+    status: 'borrowed',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'vb2',
+    department: 'แผนกไอที & สนาม',
+    vehicleName: 'รถกระบะสวัสดิการ (ฮฮ-9999 กทม)',
+    borrowDateTime: new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 16),
+    returnDateTime: new Date(Date.now() - 18 * 3600 * 1000).toISOString().slice(0, 16),
+    borrowerName: 'คุณอรอุมา เลิฟแบด',
+    purpose: 'ขนย้ายลูกแบดมินตันและเน็ตสนามใหม่',
+    status: 'returned',
     createdAt: new Date().toISOString(),
   }
 ];
@@ -83,7 +110,12 @@ export default function App() {
     return local ? JSON.parse(local) : INITIAL_BOOKINGS;
   });
 
-  const [activeTab, setActiveTab] = useState<'courts' | 'players' | 'expenses' | 'leaderboard' | 'bookings'>('courts');
+  const [vehicleBorrowings, setVehicleBorrowings] = useState<VehicleBorrowing[]>(() => {
+    const local = localStorage.getItem('badminton_vehicle_borrowings');
+    return local ? JSON.parse(local) : INITIAL_VEHICLE_BORROWINGS;
+  });
+
+  const [activeTab, setActiveTab] = useState<'courts' | 'players' | 'expenses' | 'leaderboard' | 'bookings' | 'vehicle_borrowings'>('courts');
   const [isMatchmakerOpen, setIsMatchmakerOpen] = useState(false);
   const [matchmakerCourtId, setMatchmakerCourtId] = useState<string>('');
 
@@ -120,6 +152,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('badminton_bookings', JSON.stringify(bookings));
   }, [bookings]);
+
+  useEffect(() => {
+    localStorage.setItem('badminton_vehicle_borrowings', JSON.stringify(vehicleBorrowings));
+  }, [vehicleBorrowings]);
 
   useEffect(() => {
     localStorage.setItem('badminton_admin_email', adminEmail);
@@ -185,12 +221,24 @@ export default function App() {
       handleFirestoreError(error, OperationType.LIST, 'bookings');
     });
 
+    const unsubscribeVehicles = onSnapshot(collection(db, 'vehicle_borrowings'), (snapshot) => {
+      if (!active) return;
+      const list: VehicleBorrowing[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(docSnap.data() as VehicleBorrowing);
+      });
+      setVehicleBorrowings(list.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'vehicle_borrowings');
+    });
+
     return () => {
       active = false;
       unsubscribePlayers();
       unsubscribeCourts();
       unsubscribeMatches();
       unsubscribeBookings();
+      unsubscribeVehicles();
     };
   }, []);
 
@@ -199,9 +247,11 @@ export default function App() {
     newPlayers: Player[],
     newCourts: Court[],
     newMatches: Match[],
-    newBookings: Booking[]
+    newBookings: Booking[],
+    newVehicleBorrowings?: VehicleBorrowing[]
   ) => {
     isSyncingRef.current = true;
+    const currentVehicles = newVehicleBorrowings || vehicleBorrowings;
 
     // A. Sync with Firestore if configured
     if (isFirebaseConfigured()) {
@@ -252,6 +302,17 @@ export default function App() {
           batch.set(doc(db, 'bookings', b.id), b);
         });
 
+        // 5. Vehicle Borrowings Diff
+        const newVehicleIds = new Set(currentVehicles.map(v => v.id));
+        vehicleBorrowings.forEach(v => {
+          if (!newVehicleIds.has(v.id)) {
+            batch.delete(doc(db, 'vehicle_borrowings', v.id));
+          }
+        });
+        currentVehicles.forEach(v => {
+          batch.set(doc(db, 'vehicle_borrowings', v.id), v);
+        });
+
         await batch.commit();
         console.log('[Firebase] Successfully committed batch update to Firestore');
       } catch (error) {
@@ -272,6 +333,7 @@ export default function App() {
           courts: newCourts,
           matches: newMatches,
           bookings: newBookings,
+          vehicleBorrowings: currentVehicles,
         }),
       });
       if (res.ok) {
@@ -320,6 +382,7 @@ export default function App() {
                 setCourts(state.courts || []);
                 setMatches(state.matches || []);
                 setBookings(state.bookings || []);
+                setVehicleBorrowings(state.vehicleBorrowings || []);
                 setServerVersion(state.version);
               }
             }
@@ -382,6 +445,7 @@ export default function App() {
           setCourts(data.courts || []);
           setMatches(data.matches || []);
           setBookings(data.bookings || []);
+          setVehicleBorrowings(data.vehicleBorrowings || []);
           setServerVersion(data.version);
         }
       } catch (error) {
@@ -401,6 +465,38 @@ export default function App() {
     };
   }, [serverVersion, isWsConnected]);
 
+  // Vehicle Borrowing Handlers
+  const handleAddVehicleBorrowing = (data: Omit<VehicleBorrowing, 'id' | 'createdAt'>) => {
+    const newEntry: VehicleBorrowing = {
+      ...data,
+      id: 'vb_' + Date.now(),
+      createdAt: new Date().toISOString(),
+    };
+    setVehicleBorrowings((prev) => {
+      const next = [newEntry, ...prev];
+      syncStateWithServer(players, courts, matches, bookings, next);
+      return next;
+    });
+  };
+
+  const handleUpdateVehicleStatus = (id: string, status: VehicleBorrowingStatus, returnDateTime?: string) => {
+    setVehicleBorrowings((prev) => {
+      const next = prev.map((v) =>
+        v.id === id ? { ...v, status, returnDateTime: returnDateTime || v.returnDateTime } : v
+      );
+      syncStateWithServer(players, courts, matches, bookings, next);
+      return next;
+    });
+  };
+
+  const handleDeleteVehicleBorrowing = (id: string) => {
+    setVehicleBorrowings((prev) => {
+      const next = prev.filter((v) => v.id !== id);
+      syncStateWithServer(players, courts, matches, bookings, next);
+      return next;
+    });
+  };
+
   // Booking Handlers
   const handleAddBooking = (bookingData: Omit<Booking, 'id' | 'createdAt'>) => {
     const newBooking: Booking = {
@@ -410,7 +506,7 @@ export default function App() {
     };
     setBookings((prev) => {
       const next = [newBooking, ...prev];
-      syncStateWithServer(players, courts, matches, next);
+      syncStateWithServer(players, courts, matches, next, vehicleBorrowings);
       return next;
     });
   };
@@ -418,7 +514,7 @@ export default function App() {
   const handleConfirmBooking = (id: string) => {
     setBookings((prev) => {
       const next = prev.map((b) => (b.id === id ? { ...b, status: 'confirmed' } : b));
-      syncStateWithServer(players, courts, matches, next);
+      syncStateWithServer(players, courts, matches, next, vehicleBorrowings);
       return next;
     });
   };
@@ -426,7 +522,7 @@ export default function App() {
   const handleDeleteBooking = (id: string) => {
     setBookings((prev) => {
       const next = prev.filter((b) => b.id !== id);
-      syncStateWithServer(players, courts, matches, next);
+      syncStateWithServer(players, courts, matches, next, vehicleBorrowings);
       return next;
     });
   };
@@ -922,6 +1018,18 @@ export default function App() {
               </span>
             )}
           </button>
+          <button
+            id="tab-vehicles"
+            onClick={() => setActiveTab('vehicle_borrowings')}
+            className={`pb-3 px-4 text-sm font-extrabold transition-all duration-200 flex items-center gap-2 border-b-2 shrink-0 ${
+              activeTab === 'vehicle_borrowings'
+                ? 'border-indigo-600 text-indigo-700'
+                : 'border-transparent text-slate-400 hover:text-slate-600'
+            }`}
+          >
+            <Car className="w-4 h-4 text-indigo-600" />
+            <span>ยืมรถประจำวัน ({vehicleBorrowings.length})</span>
+          </button>
         </div>
 
         {/* Tab Contents with Transition Animations */}
@@ -1004,6 +1112,25 @@ export default function App() {
                   onAddBooking={handleAddBooking}
                   onConfirmBooking={handleConfirmBooking}
                   onDeleteBooking={handleDeleteBooking}
+                  isAdmin={isAdmin}
+                />
+              </motion.div>
+            )}
+
+            {activeTab === 'vehicle_borrowings' && (
+              <motion.div
+                key="vehicle_borrowings"
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -15 }}
+                transition={{ duration: 0.15 }}
+              >
+                <VehicleBorrowingManager
+                  borrowings={vehicleBorrowings}
+                  players={players}
+                  onAddBorrowing={handleAddVehicleBorrowing}
+                  onUpdateStatus={handleUpdateVehicleStatus}
+                  onDeleteBorrowing={handleDeleteVehicleBorrowing}
                   isAdmin={isAdmin}
                 />
               </motion.div>

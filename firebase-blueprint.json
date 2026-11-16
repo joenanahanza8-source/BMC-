@@ -61,6 +61,23 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "courtId", "date", "timeSlot", "bookerName", "phoneNumber", "status", "createdAt"]
+    },
+    "VehicleBorrowing": {
+      "title": "VehicleBorrowing",
+      "description": "Represents a daily vehicle borrowing record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the vehicle borrowing record" },
+        "department": { "type": "string", "maxLength": 100, "description": "Department name" },
+        "vehicleName": { "type": "string", "maxLength": 100, "description": "Vehicle name or license plate" },
+        "borrowDateTime": { "type": "string", "maxLength": 100, "description": "Date and time of borrowing" },
+        "borrowerName": { "type": "string", "maxLength": 100, "description": "Name of the borrower" },
+        "returnDateTime": { "type": "string", "maxLength": 100, "description": "Expected or actual return date and time" },
+        "purpose": { "type": "string", "maxLength": 500, "description": "Purpose or reason for borrowing" },
+        "status": { "type": "string", "enum": ["borrowed", "returned", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "department", "vehicleName", "borrowDateTime", "borrowerName", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -79,6 +96,10 @@
     "bookings": {
       "schema": "Booking",
       "description": "Collection of bookings"
+    },
+    "vehicle_borrowings": {
+      "schema": "VehicleBorrowing",
+      "description": "Collection of daily vehicle borrowing records"
     }
   }
 }
